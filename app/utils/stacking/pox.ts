@@ -10,9 +10,10 @@ import {
   serializeCV,
   deserializeCV,
   TupleCV,
+  ContractCallOptions,
 } from '@blockstack/stacks-transactions';
-import { randomBytes } from 'crypto';
 import BN from 'bn.js';
+import { address } from 'bitcoinjs-lib';
 
 interface POXInfo {
   contract_id: string;
@@ -32,6 +33,7 @@ interface StackerInfo {
     version: Buffer;
     hashbytes: Buffer;
   };
+  btcAddress: string;
 }
 
 export class POX {
@@ -45,7 +47,7 @@ export class POX {
 
   async lockSTX({
     amountSTX,
-    // poxAddress,
+    poxAddress,
     cycles,
     key,
   }: {
@@ -56,17 +58,17 @@ export class POX {
   }) {
     const info = await this.getPOXInfo();
     const contract = info.contract_id;
-    // TODO: actuall parse BTC address into version, checksum
-    const version = bufferCV(Buffer.from('01', 'hex'));
-    const hashbytes = bufferCV(randomBytes(20));
+    const { version, hash } = this.convertBTCAddress(poxAddress);
+    const versionBuffer = bufferCV(new BN(version, 10).toBuffer());
+    const hashbytes = bufferCV(hash);
     const address = tupleCV({
       hashbytes,
-      version,
+      version: versionBuffer,
     });
     const [contractAddress, contractName]: string[] = contract.split('.');
     const network = new StacksTestnet();
     network.coreApiUrl = 'http://localhost:3999';
-    const txOptions = {
+    const txOptions: ContractCallOptions = {
       contractAddress,
       contractName,
       functionName: 'stack-stx',
@@ -74,10 +76,14 @@ export class POX {
       senderKey: key,
       validateWithAbi: true,
       network,
+      fee: new BN(5000, 10),
     };
     const tx = await makeContractCall(txOptions);
     const res = await broadcastTransaction(tx, network);
-    return res;
+    if (typeof res === 'string') {
+      return res;
+    }
+    throw new Error(`${res.error} - ${res.reason}`);
   }
 
   async getStackerInfo(address: string): Promise<StackerInfo> {
@@ -93,14 +99,17 @@ export class POX {
     // eslint-disable-next-line @typescript-eslint/ban-ts-comment
     // @ts-ignore
     const data = cv.value.data;
+    const version = data['pox-addr'].data.version.buffer;
+    const hashbytes = data['pox-addr'].data.hashbytes.buffer;
     return {
       lockPeriod: data['lock-period'].value,
       amountSTX: data['amount-ustx'].value,
       firstRewardCycle: data['first-reward-cycle'].value,
       poxAddr: {
-        version: data['pox-addr'].data.version.buffer,
-        hashbytes: data['pox-addr'].data.hashbytes.buffer,
+        version,
+        hashbytes,
       },
+      btcAddress: this.getBTCAddress(version, hashbytes),
     };
   }
 
@@ -127,5 +136,14 @@ export class POX {
       },
     });
     return response.data.result as string;
+  }
+
+  convertBTCAddress(btcAddress: string) {
+    return address.fromBase58Check(btcAddress);
+  }
+
+  getBTCAddress(version: Buffer, checksum: Buffer) {
+    const btcAddress = address.toBase58Check(checksum, new BN(version).toNumber());
+    return btcAddress;
   }
 }
